@@ -31,6 +31,13 @@ export class Hotkeys {
 		}
 	}
 
+	pressZ(event: KeyboardEvent) {
+		if (event.ctrlKey && !event.altKey && !event.metaKey) {
+			event.preventDefault();
+			this.ui.game.undoLastMove();
+		}
+	}
+
 	pressS(event) {
 		// Shift+S: save snapshot (replaces scoreboard toggle, which moved to T)
 		if (event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
@@ -345,6 +352,11 @@ export class Hotkeys {
 }
 export function getHotKeys(hk) {
 	const hotkeys = {
+		KeyZ: {
+			onkeydown(event) {
+				hk.pressZ(event);
+			},
+		},
 		KeyS: {
 			onkeydown(event) {
 				hk.pressS(event);
