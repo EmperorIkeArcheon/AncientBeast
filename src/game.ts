@@ -188,6 +188,35 @@ export default class Game {
 	drops: Drop[];
 	effects: Effect[];
 	activeCreature: Creature | undefined;
+
+	/** One-step local undo for the most recent creature movement. */
+	private lastUndoMove: {
+		creature: Creature;
+		turn: number;
+		x: number;
+		y: number;
+		remainingMove: number;
+		movementPool: number;
+		accumulatedTeleportRange: number;
+		energy: number;
+	} | null = null;
+
+	undoLastMove(): boolean {
+		const undo = this.lastUndoMove;
+		if (!undo || undo.turn !== this.turn || this.activeCreature !== undo.creature) {
+			return false;
+		}
+		undo.creature.setPosition(undo.x, undo.y);
+		undo.creature.remainingMove = undo.remainingMove;
+		undo.creature.movementPool = undo.movementPool;
+		undo.creature.accumulatedTeleportRange = undo.accumulatedTeleportRange;
+		undo.creature.energy = undo.energy;
+		this.lastUndoMove = null;
+		undo.creature.queryMove();
+		this.UI?.updateActivebox();
+		this.updateQueueDisplay();
+		return true;
+	}
 	matchid: string;
 	playersReady: boolean;
 	preventSetup: boolean;
@@ -2847,13 +2876,26 @@ export default class Game {
 		callback?: () => void,
 	) {
 		const hex = this.grid.hexes[record.target.y][record.target.x];
+		const creature = this.activeCreature;
+		const before = {
+			creature,
+			turn: this.turn,
+			x: creature.x,
+			y: creature.y,
+			remainingMove: creature.remainingMove,
+			movementPool: creature.movementPool,
+			accumulatedTeleportRange: creature.accumulatedTeleportRange,
+			energy: creature.energy,
+		};
 		const path = record.path
 			?.map((p) => this.grid.hexes[p.y]?.[p.x])
 			.filter((pathHex): pathHex is Hex => Boolean(pathHex));
-		this.activeCreature.moveTo(hex, {
+		this.lastUndoMove = before;
+		creature.moveTo(hex, {
 			path: path && path.length ? path : undefined,
-			// eslint-disable-next-line @typescript-eslint/no-empty-function
-			callback: callback ?? function () {},
+			callback: () => {
+				callback?.();
+			},
 		});
 	}
 
