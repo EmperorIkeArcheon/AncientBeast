@@ -1,0 +1,597 @@
+diff --git a/assets/icons/undo.svg b/assets/icons/undo.svg
+new file mode 100644
+index 0000000..2620cce
+--- /dev/null
++++ b/assets/icons/undo.svg
+@@ -0,0 +1 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><g fill="#fff" fill-opacity="1" stroke="#000" stroke-opacity="1" stroke-width="4"><path fill-rule="evenodd" d="M256 66c104.9 0 190 85.1 190 190s-85.1 190-190 190S66 360.900 66 256 151.100 66 256 66zm0 36c-85 0-154 69-154 154s69 154 154 154 154-69 154-154-69-154-154-154z"/><path d="M242 140h28v128h-28z"/><path d="M256 244l-88 52 14 24 88-52z"/><path d="M24 226h120l-60 90z"/></g></svg>
+diff --git a/src/__tests__/undo.test.ts b/src/__tests__/undo.test.ts
+new file mode 100644
+index 0000000..b2119e2
+--- /dev/null
++++ b/src/__tests__/undo.test.ts
+@@ -0,0 +1,133 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++import { describe, expect, test, jest, beforeEach } from '@jest/globals';
++import { UndoManager } from '../undo';
++
++/** Minimal stand-in for the parts of Game that UndoManager reads. */
++function makeGame(overrides: Record<string, unknown> = {}) {
++	const game: any = {
++		multiplayer: false,
++		isReplayInProgress: false,
++		gameState: 'playing',
++		turn: 3,
++		turnThrottle: false,
++		freezedInput: false,
++		animationQueue: [],
++		_deferredQueryMovePending: 0,
++		trapId: 0,
++		effectId: 0,
++		dropId: 0,
++		creatures: [
++			{ id: 0, dead: false },
++			{ id: 1, dead: false },
++		],
++		traps: [],
++		drops: [],
++		effects: [],
++		queue: { queue: [{}, {}], nextQueue: [] },
++		activeCreature: { id: 1, player: { controller: 'human' } },
++		gamelog: { actions: [] as unknown[] },
++		serializeSnapshot: jest.fn(() => ({ marker: 'snapshot' })),
++		restoreFromUndo: jest.fn(),
++		...overrides,
++	};
++	game.undo = new UndoManager(game);
++	return game;
++}
++
++/** Simulates "the player moved": capture, log the action, board goes idle. */
++function doAction(game: any) {
++	game.undo.capture();
++	game.gamelog.actions.push({ action: 'move' });
++}
++
++describe('UndoManager', () => {
++	let game: any;
++	beforeEach(() => {
++		game = makeGame();
++	});
++
++	test('nothing to undo before any action', () => {
++		expect(game.undo.canUndo()).toBe(false);
++		expect(game.undo.undo()).toBe(false);
++	});
++
++	test('the last action can be undone and the log is rewound', () => {
++		game.gamelog.actions.push({ action: 'skip' });
++		doAction(game);
++		expect(game.undo.canUndo()).toBe(true);
++
++		expect(game.undo.undo()).toBe(true);
++		expect(game.restoreFromUndo).toHaveBeenCalledWith({ marker: 'snapshot' }, 1);
++	});
++
++	test('only usable once per round, and again after a new round starts', () => {
++		doAction(game);
++		expect(game.undo.undo()).toBe(true);
++
++		doAction(game);
++		expect(game.undo.canUndo()).toBe(false);
++
++		game.turn = 4;
++		game.undo.onNewRound();
++		doAction(game);
++		expect(game.undo.canUndo()).toBe(true);
++	});
++
++	test('a newer action replaces the older one (only the very last is undoable)', () => {
++		doAction(game);
++		doAction(game);
++		game.undo.undo();
++		expect(game.restoreFromUndo).toHaveBeenCalledWith({ marker: 'snapshot' }, 1);
++	});
++
++	test('unavailable while the action is still animating or input is locked', () => {
++		doAction(game);
++		game.animationQueue.push('anim');
++		expect(game.undo.canUndo()).toBe(false);
++		game.animationQueue.length = 0;
++		game.freezedInput = true;
++		expect(game.undo.canUndo()).toBe(false);
++		game.freezedInput = false;
++		expect(game.undo.canUndo()).toBe(true);
++	});
++
++	test('unavailable when the action killed or created something', () => {
++		doAction(game);
++		game.creatures[0].dead = true;
++		expect(game.undo.canUndo()).toBe(false);
++
++		doAction(game);
++		game.effects.push({});
++		expect(game.undo.canUndo()).toBe(false);
++	});
++
++	test('unavailable after the turn is handed over', () => {
++		doAction(game);
++		game.undo.clear();
++		expect(game.undo.canUndo()).toBe(false);
++
++		doAction(game);
++		game.activeCreature = { id: 0, player: { controller: 'human' } };
++		expect(game.undo.canUndo()).toBe(false);
++	});
++
++	test('disabled in multiplayer, replays and for bot turns', () => {
++		for (const patch of [
++			{ multiplayer: true },
++			{ isReplayInProgress: true },
++			{ activeCreature: { id: 1, player: { controller: 'bot' } } },
++		]) {
++			const g = makeGame(patch);
++			doAction(g);
++			expect(g.undo.canUndo()).toBe(false);
++		}
++	});
++
++	test('an unsnapshottable board just means Undo is unavailable', () => {
++		game.serializeSnapshot.mockImplementation(() => {
++			throw new Error('pending animation');
++		});
++		doAction(game);
++		expect(game.undo.canUndo()).toBe(false);
++	});
++});
+diff --git a/src/ability.ts b/src/ability.ts
+index 6fae939..5e56098 100644
+--- a/src/ability.ts
++++ b/src/ability.ts
+@@ -527,6 +527,8 @@ export class Ability {
+ 		const game = this.game;
+ 		// Gamelog Event Registration
+ 		if (game.triggers.onQuery.test(this.getTrigger())) {
++			// Remember the board so this action can be undone (Undo Move)
++			game.undo?.capture();
+ 			// The unit that owns this ability performed the action. Passing it
+ 			// explicitly keeps replay aligned when an ability fires for a
+ 			// creature other than the active one.
+diff --git a/src/creature.ts b/src/creature.ts
+index b5e35c4..260ee41 100644
+--- a/src/creature.ts
++++ b/src/creature.ts
+@@ -1097,6 +1097,7 @@ export class Creature {
+ 					// Stamp the mover so replay can wait for this creature's turn.
+ 					// `activeCreature` is normally the same one, but a move can be
+ 					// recorded from a creature that is only just becoming active.
++					game.undo?.capture();
+ 					game.gamelog.add(moveRecord, {
+ 						id: args.creature.id,
+ 						name: args.creature.name,
+diff --git a/src/game.ts b/src/game.ts
+index 8f346ab..ac91f5e 100644
+--- a/src/game.ts
++++ b/src/game.ts
+@@ -56,6 +56,7 @@ import { Ability } from './ability';
+ import { Effect } from './effect';
+ import { GameConfig } from './script';
+ import { Trap } from './utility/trap';
++import { UndoManager } from './undo';
+ import { Drop } from './drop';
+ import { CreatureType, Realm, UnitData } from './data/types';
+ import { setAudioMode, getAudioMode, DEFAULT_AUDIO_MODE } from './sound/soundsys';
+@@ -214,6 +215,7 @@ export default class Game {
+ 	animationQueue: (Animation | AnimationID)[];
+ 	checkTimeFrequency: number;
+ 	gamelog: GameLog;
++	undo: UndoManager;
+ 	configData: Partial<GameConfig>;
+ 	match: object;
+ 	multiplayer: boolean;
+@@ -682,6 +684,7 @@ export default class Game {
+ 		this.animationQueue = [];
+ 		this.checkTimeFrequency = 1000;
+ 		this._deferredQueryMovePending = 0;
++		this.undo = new UndoManager(this);
+ 		this.gamelog = new GameLog(
+ 			(log) => this.onLogSave(log),
+ 			(log, mode) => this.onLogLoad(log, mode),
+@@ -1867,6 +1870,7 @@ export default class Game {
+ 			// ignore
+ 		}
+ 		this.log(`Round ${this.turn}`, 'roundmarker', true);
++		this.undo?.onNewRound();
+ 		this.onStartOfRound();
+ 		this.botController.maybeForceOffensive();
+ 		this.nextCreature(remote);
+@@ -1886,6 +1890,8 @@ export default class Game {
+ 		// BOTH clients would end up broadcasting their own 'turn-update' for the
+ 		// same transition, causing races between the two players' turn state.
+ 		const previousActiveCreature = this.activeCreature;
++		// The captured action belongs to the turn that is ending.
++		this.undo?.clear();
+ 
+ 		// The dash belongs to the turn being handed over, so it is dismissed
+ 		// whenever the next queued creature is a different one. Match start is
+@@ -3954,6 +3960,36 @@ export default class Game {
+ 		this.soundsys?.setEffectsMuted(false);
+ 	}
+ 
++	/**
++	 * Turn the board back to `snapshot`, the state captured just before the last
++	 * action (see {@link UndoManager}). The snapshot has to come from this same
++	 * match and the action must not have created or destroyed any entity.
++	 *
++	 * The match clock is deliberately not rewound: undoing must not refund the
++	 * time the player spent, so each player's time pool is put back afterwards.
++	 */
++	restoreFromUndo(snapshot: any, gamelogLength: number): void {
++		const timePools = this.players.map((player) => ({
++			bonusTimePool: player.bonusTimePool,
++			totalTimePool: player.totalTimePool,
++			startTime: player.startTime,
++		}));
++
++		this.stopTimer();
++		this.UI?.selectAbility?.(-1);
++		this.grid?.clearAllXray?.();
++
++		// The undone action never happened as far as a saved log is concerned.
++		this.gamelog.actions.length = gamelogLength;
++
++		this.reconstructFromSnapshot(snapshot);
++
++		this.players.forEach((player, i) => {
++			Object.assign(player, timePools[i]);
++		});
++		this.log('Undo Move');
++	}
++
+ 	// --- Helper methods ---
+ 
+ 	private findMatchingCreature(cSnap: any): Creature | null {
+diff --git a/src/style/styles.less b/src/style/styles.less
+index b101a6a..257f459 100644
+--- a/src/style/styles.less
++++ b/src/style/styles.less
+@@ -503,9 +503,48 @@
+ 	}
+ }
+ 
++// Undo Move shares the Delay Unit slot; the two are mutually exclusive.
++// The container gets `.undo-mode` while an action can be undone.
++.button#undo {
++	background-image: url('assets/icons/undo.svg');
++
++	&.cancelIcon {
++		background-image: url('assets/icons/cancel.svg') !important;
++	}
++
++	&.disabled {
++		transform: perspective(900px) rotateY(0deg) !important;
++		opacity: 0.35;
++
++		&:hover {
++			opacity: 0.35;
++		}
++	}
++}
++
++#rightpanel .delay-control {
++	#undo,
++	#undo + .desc {
++		display: none;
++	}
++
++	&.undo-mode {
++		#delay,
++		#delay + .desc {
++			display: none;
++		}
++
++		#undo,
++		#undo + .desc {
++			display: block;
++		}
++	}
++}
++
+ // During bot turns, show not-allowed cursor on skip/delay buttons and ability icons
+ #rightpanel.bot-turn .button#skip:hover,
+-#rightpanel.bot-turn .button#delay:hover {
++#rightpanel.bot-turn .button#delay:hover,
++#rightpanel.bot-turn .button#undo:hover {
+ 	cursor: not-allowed !important;
+ }
+ 
+@@ -515,7 +554,8 @@
+ 
+ // During opponent's turn in multiplayer, show not-allowed cursor
+ #rightpanel.opponent-turn .button#skip:hover,
+-#rightpanel.opponent-turn .button#delay:hover {
++#rightpanel.opponent-turn .button#delay:hover,
++#rightpanel.opponent-turn .button#undo:hover {
+ 	cursor: not-allowed !important;
+ }
+ 
+diff --git a/src/templates/hotkeys.html b/src/templates/hotkeys.html
+index f83aa56..d8a1cad 100644
+--- a/src/templates/hotkeys.html
++++ b/src/templates/hotkeys.html
+@@ -20,6 +20,7 @@
+ 								<ul class="hotkeys-list">
+ 									<li><span class="shortcut">S</span> Skip Turn</li>
+ 									<li><span class="shortcut">D</span> Delay Unit</li>
++									<li><span class="shortcut">Ctrl+Z</span> Undo Move</li>
+ 									<li><span class="shortcut">Enter / Space</span> Confirm</li>
+ 									<li><span class="shortcut">Esc</span> Cancel / Close</li>
+ 								</ul>
+diff --git a/src/templates/interface.html b/src/templates/interface.html
+index be17ecd..d2f7a6c 100644
+--- a/src/templates/interface.html
++++ b/src/templates/interface.html
+@@ -55,6 +55,13 @@
+ 							<span>Delay Unit</span>
+ 							<p>Delayed creatures will act at the end of the round, if alive and still able to.</p>
+ 						</div>
++						<div id="undo" class="button"></div>
++						<div class="desc undo-desc">
++							<div class="arrow"></div>
++							<div class="shortcut">hotkey Ctrl + Z</div>
++							<span>Undo Move</span>
++							<p>Turn back time until before the last action. Usable once per round.</p>
++						</div>
+ 					</div>
+ 					<div class="panel-control fullscreen-control" style="position:relative" >
+ 						<div id="fullscreen" class="button slideIn" >
+diff --git a/src/ui/hotkeys.ts b/src/ui/hotkeys.ts
+index d0c68b6..95165b8 100644
+--- a/src/ui/hotkeys.ts
++++ b/src/ui/hotkeys.ts
+@@ -76,6 +76,21 @@ export class Hotkeys {
+ 		}
+ 	}
+ 
++	pressZ(event: KeyboardEvent) {
++		// Ctrl+Z (Cmd+Z on macOS) triggers Undo Move; bare Z does nothing.
++		if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) {
++			return;
++		}
++		if (this.ui.dashopen) {
++			return;
++		}
++		if (this.ui.game.botController?.isBotTurn()) {
++			this.ui.showCancelIconOnButton(this.ui.btnUndo.$button);
++			return;
++		}
++		this.ui.btnUndo.triggerClick();
++	}
++
+ 	pressT() {
+ 		this.ui.toggleView('score');
+ 	}
+@@ -350,6 +365,11 @@ export function getHotKeys(hk) {
+ 				hk.pressS(event);
+ 			},
+ 		},
++		KeyZ: {
++			onkeydown(event) {
++				hk.pressZ(event);
++			},
++		},
+ 		KeyT: {
+ 			onkeydown() {
+ 				hk.pressT();
+diff --git a/src/ui/interface.ts b/src/ui/interface.ts
+index 883e8ef..45d0012 100644
+--- a/src/ui/interface.ts
++++ b/src/ui/interface.ts
+@@ -551,6 +551,7 @@ export class UI {
+ 	animationUpgradeTimeOutID: ReturnType<typeof setTimeout>;
+ 	queryUnit: string;
+ 	btnDelay: Button;
++	btnUndo: Button;
+ 	btnFlee?: Button;
+ 	btnSaveLog: Button;
+ 	btnRestartMatch: Button;
+@@ -823,6 +824,30 @@ export class UI {
+ 		);
+ 		this.buttons.push(this.btnDelay);
+ 
++		// Undo Move Button - shares the Delay Unit slot (see refreshUndoButton)
++		this.btnUndo = new Button(
++			{
++				$button: $j('#undo.button'),
++				hasShortcut: true,
++				click: () => {
++					if (this.dashopen) {
++						return;
++					}
++					if (game.botController.isBotTurn()) {
++						this.showCancelIconOnButton(this.btnUndo.$button);
++						return;
++					}
++					if (game.turnThrottle || !game.undo.canUndo()) {
++						return;
++					}
++					game.undo.undo();
++					this.refreshUndoButton();
++				},
++			},
++			{ isAcceptingInput: this.configuration.isAcceptingInput },
++		);
++		this.buttons.push(this.btnUndo);
++
+ 		this.btnSaveLog = new Button(
+ 			{
+ 				$button: $j('#save.button'),
+@@ -4141,6 +4166,19 @@ export class UI {
+ 		if (areTurnActionButtonsDisabled(game)) {
+ 			this.btnSkipTurn.changeState(ButtonStateEnum.disabled);
+ 		}
++
++		this.refreshUndoButton();
++	}
++
++	/**
++	 * Undo Move and Delay Unit are mutually exclusive: as soon as the last
++	 * action can be undone, Undo takes the Delay button's place; otherwise Delay
++	 * is shown as usual.
++	 */
++	refreshUndoButton() {
++		const available = Boolean(this.game.undo?.canUndo());
++		$j('#rightpanel .delay-control').toggleClass('undo-mode', available);
++		this.btnUndo?.changeState(available ? ButtonStateEnum.slideIn : ButtonStateEnum.disabled);
+ 	}
+ 
+ 	updateTimer() {
+diff --git a/src/undo.ts b/src/undo.ts
+new file mode 100644
+index 0000000..fc6f296
+--- /dev/null
++++ b/src/undo.ts
+@@ -0,0 +1,143 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++import type Game from './game';
++
++/**
++ * "Undo Move" (issue #2704).
++ *
++ * Right before the active creature performs an action (a move or an ability),
++ * `capture()` stores a match snapshot and the current gamelog length. While the
++ * action is the very last thing that happened, `canUndo()` is true and the
++ * Undo button replaces the Delay button; `undo()` then turns the board back to
++ * the captured state.
++ *
++ * Rules (from the issue):
++ *  - Only the very last action can be undone.
++ *  - Usable once per match round.
++ *  - Mutually exclusive with "Delay Unit" - the UI shows one or the other.
++ *
++ * Scope: an action is only undoable when it left the *set* of board entities
++ * alone (no deaths, summons, traps, drops or new/removed effects). Everything
++ * else those actions can touch - positions, health, energy, endurance, ability
++ * usage, statuses, plasma - is covered by the snapshot. Rolling back sprites of
++ * entities that were created or destroyed needs a real state manager, so those
++ * actions simply do not offer Undo; Delay stays visible instead.
++ */
++
++type UndoRecord = {
++	snapshot: any;
++	/** Fingerprint of the entity sets when the action started. */
++	fingerprint: string;
++	/** `gamelog.actions.length` before the action was logged. */
++	gamelogLength: number;
++	creatureId: number;
++	round: number;
++};
++
++/** Cheap summary of everything an undo cannot recreate (see "Scope" above). */
++function entityFingerprint(game: Game): string {
++	const creatures = (game.creatures || []).filter(Boolean);
++	return [
++		creatures.length,
++		creatures.filter((c) => !c.dead).length,
++		game.traps.length,
++		game.drops.length,
++		game.effects.length,
++		game.trapId,
++		game.effectId,
++		game.dropId,
++		game.queue.queue.length,
++		game.queue.nextQueue.length,
++	].join('|');
++}
++
++export class UndoManager {
++	private record: UndoRecord | null = null;
++	/** Round in which Undo was last used, or -1 if it has not been used yet. */
++	private usedInRound = -1;
++
++	constructor(private readonly game: Game) {}
++
++	/** Whether this kind of match supports undoing at all. */
++	private get enabled(): boolean {
++		const game = this.game;
++		return (
++			!game.multiplayer &&
++			!game.isReplayInProgress &&
++			game.gameState === 'playing' &&
++			game.activeCreature?.player?.controller === 'human'
++		);
++	}
++
++	/**
++	 * Remember the board as it is right now. Call just before an action is
++	 * logged and started. A newer capture replaces the older one, which is what
++	 * keeps Undo limited to the very last action.
++	 */
++	capture(): void {
++		this.record = null;
++		const game = this.game;
++		const creature = game.activeCreature;
++		if (!this.enabled || !creature || this.usedInRound === game.turn) {
++			return;
++		}
++		try {
++			this.record = {
++				snapshot: game.serializeSnapshot(),
++				fingerprint: entityFingerprint(game),
++				gamelogLength: game.gamelog.actions.length,
++				creatureId: creature.id,
++				round: game.turn,
++			};
++		} catch (error) {
++			// Pending effects, events or animations make a faithful snapshot
++			// impossible (SnapshotCompatibilityError). Undo is just unavailable.
++			this.record = null;
++		}
++	}
++
++	/** Forget the captured action, e.g. when the turn is handed over. */
++	clear(): void {
++		this.record = null;
++	}
++
++	/** A new round gives the player their Undo back. */
++	onNewRound(): void {
++		this.record = null;
++		this.usedInRound = -1;
++	}
++
++	/** True when Undo can be used right now. */
++	canUndo(): boolean {
++		const game = this.game;
++		const record = this.record;
++		if (!record || !this.enabled) {
++			return false;
++		}
++		return (
++			this.usedInRound !== game.turn &&
++			record.round === game.turn &&
++			record.creatureId === game.activeCreature?.id &&
++			// The action has to be fully resolved: nothing animating, no input lock
++			game.animationQueue.length === 0 &&
++			!game._deferredQueryMovePending &&
++			!game.turnThrottle &&
++			!game.freezedInput &&
++			// Something has to have happened since the capture
++			game.gamelog.actions.length > record.gamelogLength &&
++			// ...and it must not have created or destroyed anything
++			entityFingerprint(game) === record.fingerprint
++		);
++	}
++
++	/** Turn back time to just before the last action. Returns true on success. */
++	undo(): boolean {
++		if (!this.canUndo() || !this.record) {
++			return false;
++		}
++		const { snapshot, gamelogLength } = this.record;
++		this.record = null;
++		this.usedInRound = this.game.turn;
++		this.game.restoreFromUndo(snapshot, gamelogLength);
++		return true;
++	}
++}

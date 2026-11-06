@@ -527,6 +527,8 @@ export class Ability {
 		const game = this.game;
 		// Gamelog Event Registration
 		if (game.triggers.onQuery.test(this.getTrigger())) {
+			// Remember the board so this action can be undone (Undo Move)
+			game.undo?.capture();
 			// The unit that owns this ability performed the action. Passing it
 			// explicitly keeps replay aligned when an ability fires for a
 			// creature other than the active one.
