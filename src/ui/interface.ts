@@ -551,6 +551,7 @@ export class UI {
 	animationUpgradeTimeOutID: ReturnType<typeof setTimeout>;
 	queryUnit: string;
 	btnDelay: Button;
+	btnUndoMove: Button;
 	btnFlee?: Button;
 	btnSaveLog: Button;
 	btnRestartMatch: Button;
@@ -778,6 +779,21 @@ export class UI {
 			{ isAcceptingInput: this.configuration.isAcceptingInput },
 		);
 		this.buttons.push(this.btnSkipTurn);
+
+		// Undo the most recent movement (one step, once per turn).
+		this.btnUndoMove = new Button(
+			{
+				$button: $j('#undo-move.button'),
+				hasShortcut: true,
+				click: () => {
+					if (!this.dashopen) {
+						game.undoLastMove();
+					}
+				},
+			},
+			{ isAcceptingInput: this.configuration.isAcceptingInput },
+		);
+		this.buttons.push(this.btnUndoMove);
 
 		// Delay Unit Button
 		const canPreviewDelay = () =>
