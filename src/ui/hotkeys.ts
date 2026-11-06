@@ -76,6 +76,21 @@ export class Hotkeys {
 		}
 	}
 
+	pressZ(event: KeyboardEvent) {
+		// Ctrl+Z (Cmd+Z on macOS) triggers Undo Move; bare Z does nothing.
+		if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) {
+			return;
+		}
+		if (this.ui.dashopen) {
+			return;
+		}
+		if (this.ui.game.botController?.isBotTurn()) {
+			this.ui.showCancelIconOnButton(this.ui.btnUndo.$button);
+			return;
+		}
+		this.ui.btnUndo.triggerClick();
+	}
+
 	pressT() {
 		this.ui.toggleView('score');
 	}
@@ -348,6 +363,11 @@ export function getHotKeys(hk) {
 		KeyS: {
 			onkeydown(event) {
 				hk.pressS(event);
+			},
+		},
+		KeyZ: {
+			onkeydown(event) {
+				hk.pressZ(event);
 			},
 		},
 		KeyT: {

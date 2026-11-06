@@ -56,6 +56,7 @@ import { Ability } from './ability';
 import { Effect } from './effect';
 import { GameConfig } from './script';
 import { Trap } from './utility/trap';
+import { UndoManager } from './undo';
 import { Drop } from './drop';
 import { CreatureType, Realm, UnitData } from './data/types';
 import { setAudioMode, getAudioMode, DEFAULT_AUDIO_MODE } from './sound/soundsys';
@@ -214,6 +215,7 @@ export default class Game {
 	animationQueue: (Animation | AnimationID)[];
 	checkTimeFrequency: number;
 	gamelog: GameLog;
+	undo: UndoManager;
 	configData: Partial<GameConfig>;
 	match: object;
 	multiplayer: boolean;
@@ -682,6 +684,7 @@ export default class Game {
 		this.animationQueue = [];
 		this.checkTimeFrequency = 1000;
 		this._deferredQueryMovePending = 0;
+		this.undo = new UndoManager(this);
 		this.gamelog = new GameLog(
 			(log) => this.onLogSave(log),
 			(log, mode) => this.onLogLoad(log, mode),
@@ -1867,6 +1870,7 @@ export default class Game {
 			// ignore
 		}
 		this.log(`Round ${this.turn}`, 'roundmarker', true);
+		this.undo?.onNewRound();
 		this.onStartOfRound();
 		this.botController.maybeForceOffensive();
 		this.nextCreature(remote);
@@ -1886,6 +1890,8 @@ export default class Game {
 		// BOTH clients would end up broadcasting their own 'turn-update' for the
 		// same transition, causing races between the two players' turn state.
 		const previousActiveCreature = this.activeCreature;
+		// The captured action belongs to the turn that is ending.
+		this.undo?.clear();
 
 		// The dash belongs to the turn being handed over, so it is dismissed
 		// whenever the next queued creature is a different one. Match start is
@@ -3952,6 +3958,36 @@ export default class Game {
 		// Clear replay mode so SFX unmutes
 		this.replayMode = null;
 		this.soundsys?.setEffectsMuted(false);
+	}
+
+	/**
+	 * Turn the board back to `snapshot`, the state captured just before the last
+	 * action (see {@link UndoManager}). The snapshot has to come from this same
+	 * match and the action must not have created or destroyed any entity.
+	 *
+	 * The match clock is deliberately not rewound: undoing must not refund the
+	 * time the player spent, so each player's time pool is put back afterwards.
+	 */
+	restoreFromUndo(snapshot: any, gamelogLength: number): void {
+		const timePools = this.players.map((player) => ({
+			bonusTimePool: player.bonusTimePool,
+			totalTimePool: player.totalTimePool,
+			startTime: player.startTime,
+		}));
+
+		this.stopTimer();
+		this.UI?.selectAbility?.(-1);
+		this.grid?.clearAllXray?.();
+
+		// The undone action never happened as far as a saved log is concerned.
+		this.gamelog.actions.length = gamelogLength;
+
+		this.reconstructFromSnapshot(snapshot);
+
+		this.players.forEach((player, i) => {
+			Object.assign(player, timePools[i]);
+		});
+		this.log('Undo Move');
 	}
 
 	// --- Helper methods ---

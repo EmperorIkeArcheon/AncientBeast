@@ -1097,6 +1097,7 @@ export class Creature {
 					// Stamp the mover so replay can wait for this creature's turn.
 					// `activeCreature` is normally the same one, but a move can be
 					// recorded from a creature that is only just becoming active.
+					game.undo?.capture();
 					game.gamelog.add(moveRecord, {
 						id: args.creature.id,
 						name: args.creature.name,

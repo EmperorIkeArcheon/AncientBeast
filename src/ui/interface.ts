@@ -551,6 +551,7 @@ export class UI {
 	animationUpgradeTimeOutID: ReturnType<typeof setTimeout>;
 	queryUnit: string;
 	btnDelay: Button;
+	btnUndo: Button;
 	btnFlee?: Button;
 	btnSaveLog: Button;
 	btnRestartMatch: Button;
@@ -822,6 +823,30 @@ export class UI {
 			{ isAcceptingInput: this.configuration.isAcceptingInput },
 		);
 		this.buttons.push(this.btnDelay);
+
+		// Undo Move Button - shares the Delay Unit slot (see refreshUndoButton)
+		this.btnUndo = new Button(
+			{
+				$button: $j('#undo.button'),
+				hasShortcut: true,
+				click: () => {
+					if (this.dashopen) {
+						return;
+					}
+					if (game.botController.isBotTurn()) {
+						this.showCancelIconOnButton(this.btnUndo.$button);
+						return;
+					}
+					if (game.turnThrottle || !game.undo.canUndo()) {
+						return;
+					}
+					game.undo.undo();
+					this.refreshUndoButton();
+				},
+			},
+			{ isAcceptingInput: this.configuration.isAcceptingInput },
+		);
+		this.buttons.push(this.btnUndo);
 
 		this.btnSaveLog = new Button(
 			{
@@ -4141,6 +4166,19 @@ export class UI {
 		if (areTurnActionButtonsDisabled(game)) {
 			this.btnSkipTurn.changeState(ButtonStateEnum.disabled);
 		}
+
+		this.refreshUndoButton();
+	}
+
+	/**
+	 * Undo Move and Delay Unit are mutually exclusive: as soon as the last
+	 * action can be undone, Undo takes the Delay button's place; otherwise Delay
+	 * is shown as usual.
+	 */
+	refreshUndoButton() {
+		const available = Boolean(this.game.undo?.canUndo());
+		$j('#rightpanel .delay-control').toggleClass('undo-mode', available);
+		this.btnUndo?.changeState(available ? ButtonStateEnum.slideIn : ButtonStateEnum.disabled);
 	}
 
 	updateTimer() {

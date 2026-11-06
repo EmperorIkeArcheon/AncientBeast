@@ -503,9 +503,48 @@
 	}
 }
 
+// Undo Move shares the Delay Unit slot; the two are mutually exclusive.
+// The container gets `.undo-mode` while an action can be undone.
+.button#undo {
+	background-image: url('assets/icons/undo.svg');
+
+	&.cancelIcon {
+		background-image: url('assets/icons/cancel.svg') !important;
+	}
+
+	&.disabled {
+		transform: perspective(900px) rotateY(0deg) !important;
+		opacity: 0.35;
+
+		&:hover {
+			opacity: 0.35;
+		}
+	}
+}
+
+#rightpanel .delay-control {
+	#undo,
+	#undo + .desc {
+		display: none;
+	}
+
+	&.undo-mode {
+		#delay,
+		#delay + .desc {
+			display: none;
+		}
+
+		#undo,
+		#undo + .desc {
+			display: block;
+		}
+	}
+}
+
 // During bot turns, show not-allowed cursor on skip/delay buttons and ability icons
 #rightpanel.bot-turn .button#skip:hover,
-#rightpanel.bot-turn .button#delay:hover {
+#rightpanel.bot-turn .button#delay:hover,
+#rightpanel.bot-turn .button#undo:hover {
 	cursor: not-allowed !important;
 }
 
@@ -515,7 +554,8 @@
 
 // During opponent's turn in multiplayer, show not-allowed cursor
 #rightpanel.opponent-turn .button#skip:hover,
-#rightpanel.opponent-turn .button#delay:hover {
+#rightpanel.opponent-turn .button#delay:hover,
+#rightpanel.opponent-turn .button#undo:hover {
 	cursor: not-allowed !important;
 }
 
